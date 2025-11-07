@@ -1,0 +1,24 @@
+{
+  "name": "ai-quizmaster-backend",
+  "version": "1.0.0",
+  "description": "Express backend for AI QuizMaster with Gemini-powered quiz generation",
+  "main": "src/server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "nodemon src/server.js",
+    "lint": "eslint ."
+  },
+  "dependencies": {
+    "@google/generative-ai": "^0.4.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "mongoose": "^7.6.3"
+  },
+  "devDependencies": {
+    "eslint": "^8.57.0",
+    "nodemon": "^3.1.4"
+  }
+}
+
