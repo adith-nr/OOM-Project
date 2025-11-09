@@ -4,15 +4,19 @@ import javax.swing.BoxLayout;
 import javax.swing.ButtonGroup;
 import javax.swing.JButton;
 import javax.swing.JComboBox;
+import javax.swing.DefaultListModel;
 import javax.swing.JFrame;
 import javax.swing.JLabel;
 import javax.swing.JOptionPane;
+import javax.swing.JList;
 import javax.swing.JPanel;
+import javax.swing.JPasswordField;
 import javax.swing.JRadioButton;
 import javax.swing.JProgressBar;
 import javax.swing.JScrollPane;
 import javax.swing.JSeparator;
 import javax.swing.JTextField;
+import javax.swing.ListSelectionModel;
 import javax.swing.SwingConstants;
 import javax.swing.SwingUtilities;
 import javax.swing.SwingWorker;
@@ -23,6 +27,9 @@ import java.awt.Dimension;
 import java.awt.Font;
 import java.awt.event.ActionEvent;
 import java.awt.Cursor;
+import java.time.Instant;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -30,9 +37,11 @@ import java.util.concurrent.ExecutionException;
 
 public class AIQuizMaster extends JFrame {
 
+    private static final String CARD_LOGIN = "LOGIN";
     private static final String CARD_HOME = "HOME";
     private static final String CARD_QUIZ = "QUIZ";
     private static final String CARD_RESULTS = "RESULTS";
+    private static final String CARD_HISTORY = "HISTORY";
     private static final Integer[] QUESTION_COUNT_OPTIONS = {5, 6, 7, 8, 9, 10};
     private static final String[] DIFFICULTY_OPTIONS = {"Easy", "Medium", "Hard"};
     private static final Color PRIMARY_COLOR = new Color(45, 99, 179);
@@ -44,31 +53,47 @@ public class AIQuizMaster extends JFrame {
     private static final Color MUTED_TEXT_COLOR = new Color(102, 117, 133);
     private static final Font TITLE_FONT = new Font("SansSerif", Font.BOLD, 28);
     private static final Font SUBTITLE_FONT = new Font("SansSerif", Font.PLAIN, 16);
+    private static final DateTimeFormatter HISTORY_TIME_FORMAT = DateTimeFormatter
+            .ofPattern("MMM d, HH:mm")
+            .withZone(ZoneId.systemDefault());
 
     private final QuizService quizService = new QuizService();
+    private final UserStorage userStorage = new UserStorage();
+    private final QuizHistoryStore historyStore = new QuizHistoryStore();
     private final CardLayout cardLayout = new CardLayout();
     private final JPanel cardContainer = new JPanel(cardLayout);
+    private final LoginPanel loginPanel = new LoginPanel();
+    private final HistoryPanel historyPanel = new HistoryPanel();
     private final HomePanel homePanel = new HomePanel();
     private final QuizPanel quizPanel = new QuizPanel();
     private final ResultPanel resultPanel = new ResultPanel();
+    private String currentUser;
 
     public AIQuizMaster() {
         super("AI QuizMaster");
         setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
-        setMinimumSize(new Dimension(640, 480));
+        setMinimumSize(new Dimension(620, 480));
         getContentPane().setBackground(BACKGROUND_COLOR);
         cardContainer.setBorder(BorderFactory.createEmptyBorder(24, 32, 24, 32));
         cardContainer.setBackground(BACKGROUND_COLOR);
         cardContainer.setOpaque(true);
 
+        cardContainer.add(loginPanel, CARD_LOGIN);
         cardContainer.add(homePanel, CARD_HOME);
         cardContainer.add(quizPanel, CARD_QUIZ);
         cardContainer.add(resultPanel, CARD_RESULTS);
+        cardContainer.add(historyPanel, CARD_HISTORY);
 
         setContentPane(cardContainer);
+        cardLayout.show(cardContainer, CARD_LOGIN);
     }
 
     private void requestQuiz(String topic, int questionCount, String difficulty) {
+        if (currentUser == null) {
+            JOptionPane.showMessageDialog(this, "Please sign in to generate quizzes.", "Sign In Required", JOptionPane.INFORMATION_MESSAGE);
+            cardLayout.show(cardContainer, CARD_LOGIN);
+            return;
+        }
         homePanel.setLoading(true);
         new QuizFetchWorker(topic, questionCount, difficulty).execute();
     }
@@ -80,6 +105,19 @@ public class AIQuizMaster extends JFrame {
 
     private void showResults(QuizService.QuizData quizData, int[] selections, int correctCount) {
         resultPanel.updateResults(quizData, selections, correctCount);
+        if (currentUser != null && quizData != null) {
+            int totalQuestions = Math.max(quizData.getQuestions().size(), 1);
+            int scorePercent = Math.round((correctCount / (float) totalQuestions) * 100f);
+            historyStore.recordResult(
+                    currentUser,
+                    quizData.getTopic(),
+                    quizData.getDifficulty(),
+                    correctCount,
+                    totalQuestions,
+                    scorePercent
+            );
+            historyPanel.refresh();
+        }
         cardLayout.show(cardContainer, CARD_RESULTS);
     }
 
@@ -87,7 +125,27 @@ public class AIQuizMaster extends JFrame {
         homePanel.reset();
         quizPanel.reset();
         resultPanel.reset();
-        cardLayout.show(cardContainer, CARD_HOME);
+        if (currentUser == null) {
+            cardLayout.show(cardContainer, CARD_LOGIN);
+        } else {
+            cardLayout.show(cardContainer, CARD_HOME);
+        }
+    }
+
+    private void handleSuccessfulLogin(String username) {
+        this.currentUser = username;
+        homePanel.updateUser(username);
+        historyPanel.refresh();
+        returnHome();
+    }
+
+    private void logoutCurrentUser() {
+        this.currentUser = null;
+        homePanel.updateUser(null);
+        quizPanel.reset();
+        resultPanel.reset();
+        homePanel.reset();
+        cardLayout.show(cardContainer, CARD_LOGIN);
     }
 
     private final class QuizFetchWorker extends SwingWorker<QuizService.QuizData, Void> {
@@ -123,12 +181,159 @@ public class AIQuizMaster extends JFrame {
         }
     }
 
+    private final class LoginPanel extends JPanel {
+        private final JTextField usernameField = new JTextField();
+        private final JPasswordField passwordField = new JPasswordField();
+        private final JPasswordField confirmPasswordField = new JPasswordField();
+        private final JLabel statusLabel = new JLabel(" ", SwingConstants.CENTER);
+        private final JButton loginButton = new JButton("Login");
+        private final JButton registerButton = new JButton("Register");
+
+        LoginPanel() {
+            setLayout(new BoxLayout(this, BoxLayout.Y_AXIS));
+            setBorder(BorderFactory.createEmptyBorder(0, 24, 0, 24));
+            setOpaque(true);
+            setBackground(BACKGROUND_COLOR);
+
+            JPanel card = createCardPanel();
+            card.setAlignmentX(CENTER_ALIGNMENT);
+
+            JLabel title = new JLabel("Welcome to AI QuizMaster");
+            title.setFont(TITLE_FONT);
+            title.setAlignmentX(CENTER_ALIGNMENT);
+
+            JLabel subtitle = new JLabel("Create an account or sign in to continue.");
+            subtitle.setFont(SUBTITLE_FONT);
+            subtitle.setAlignmentX(CENTER_ALIGNMENT);
+            subtitle.setForeground(MUTED_TEXT_COLOR);
+
+            usernameField.setAlignmentX(CENTER_ALIGNMENT);
+            usernameField.setMaximumSize(new Dimension(Integer.MAX_VALUE, 32));
+            usernameField.setFont(usernameField.getFont().deriveFont(16f));
+            usernameField.setBorder(BorderFactory.createCompoundBorder(
+                    BorderFactory.createLineBorder(SURFACE_BORDER),
+                    BorderFactory.createEmptyBorder(10, 12, 10, 12)
+            ));
+
+            passwordField.setAlignmentX(CENTER_ALIGNMENT);
+            passwordField.setMaximumSize(new Dimension(Integer.MAX_VALUE, 32));
+            passwordField.setFont(passwordField.getFont().deriveFont(16f));
+            passwordField.setBorder(BorderFactory.createCompoundBorder(
+                    BorderFactory.createLineBorder(SURFACE_BORDER),
+                    BorderFactory.createEmptyBorder(10, 12, 10, 12)
+            ));
+
+            confirmPasswordField.setAlignmentX(CENTER_ALIGNMENT);
+            confirmPasswordField.setMaximumSize(new Dimension(Integer.MAX_VALUE, 32));
+            confirmPasswordField.setFont(confirmPasswordField.getFont().deriveFont(16f));
+            confirmPasswordField.setBorder(BorderFactory.createCompoundBorder(
+                    BorderFactory.createLineBorder(SURFACE_BORDER),
+                    BorderFactory.createEmptyBorder(10, 12, 10, 12)
+            ));
+
+            statusLabel.setAlignmentX(CENTER_ALIGNMENT);
+            statusLabel.setForeground(ERROR_COLOR);
+            statusLabel.setFont(statusLabel.getFont().deriveFont(13f));
+            statusLabel.setVisible(false);
+
+            stylePrimaryButton(loginButton);
+            loginButton.setAlignmentX(CENTER_ALIGNMENT);
+            loginButton.setMaximumSize(new Dimension(220, 40));
+            loginButton.addActionListener(this::onLogin);
+
+            styleSecondaryButton(registerButton);
+            registerButton.setAlignmentX(CENTER_ALIGNMENT);
+            registerButton.setMaximumSize(new Dimension(220, 40));
+            registerButton.addActionListener(this::onRegister);
+
+            card.add(title);
+            card.add(Box.createRigidArea(new Dimension(0, 12)));
+            card.add(subtitle);
+            card.add(Box.createRigidArea(new Dimension(0, 24)));
+            card.add(new JLabel("Username"));
+            card.add(Box.createRigidArea(new Dimension(0, 4)));
+            card.add(usernameField);
+            card.add(Box.createRigidArea(new Dimension(0, 16)));
+            card.add(new JLabel("Password"));
+            card.add(Box.createRigidArea(new Dimension(0, 4)));
+            card.add(passwordField);
+            card.add(Box.createRigidArea(new Dimension(0, 16)));
+            card.add(new JLabel("Confirm Password (for registration)"));
+            card.add(Box.createRigidArea(new Dimension(0, 4)));
+            card.add(confirmPasswordField);
+            card.add(Box.createRigidArea(new Dimension(0, 24)));
+            card.add(loginButton);
+            card.add(Box.createRigidArea(new Dimension(0, 12)));
+            card.add(registerButton);
+            card.add(Box.createRigidArea(new Dimension(0, 16)));
+            card.add(statusLabel);
+
+            add(Box.createVerticalGlue());
+            add(card);
+            add(Box.createVerticalGlue());
+        }
+
+        private void onLogin(ActionEvent event) {
+            String username = usernameField.getText().trim();
+            char[] password = passwordField.getPassword();
+            if (username.isEmpty() || password.length == 0) {
+                showStatus("Enter both username and password.", ERROR_COLOR);
+                return;
+            }
+            boolean authenticated = userStorage.authenticate(username, password);
+            Arrays.fill(password, '\0');
+            passwordField.setText("");
+            if (authenticated) {
+                showStatus("Login successful.", PRIMARY_COLOR.darker());
+                SwingUtilities.invokeLater(() -> handleSuccessfulLogin(username));
+            } else {
+                showStatus("Incorrect username or password.", ERROR_COLOR);
+            }
+        }
+
+        private void onRegister(ActionEvent event) {
+            String username = usernameField.getText().trim();
+            char[] password = passwordField.getPassword();
+            char[] confirm = confirmPasswordField.getPassword();
+            if (username.isEmpty() || password.length == 0) {
+                showStatus("Username and password are required.", ERROR_COLOR);
+                return;
+            }
+            if (!Arrays.equals(password, confirm)) {
+                showStatus("Passwords do not match.", ERROR_COLOR);
+                return;
+            }
+            try {
+                userStorage.register(username, password);
+                showStatus("Registration complete. You can sign in now.", PRIMARY_COLOR.darker());
+            } catch (IllegalArgumentException ex) {
+                showStatus(ex.getMessage(), ERROR_COLOR);
+            } catch (Exception ex) {
+                showStatus("Failed to register user.", ERROR_COLOR);
+            } finally {
+                Arrays.fill(password, '\0');
+                Arrays.fill(confirm, '\0');
+                passwordField.setText("");
+                confirmPasswordField.setText("");
+            }
+        }
+
+        private void showStatus(String message, Color color) {
+            statusLabel.setText(message);
+            statusLabel.setForeground(color);
+            statusLabel.setVisible(true);
+        }
+    }
+
     private final class HomePanel extends JPanel {
         private final JTextField topicField = new JTextField();
         private final JComboBox<Integer> questionCountCombo = new JComboBox<>(QUESTION_COUNT_OPTIONS);
         private final JComboBox<String> difficultyCombo = new JComboBox<>(DIFFICULTY_OPTIONS);
         private final JButton generateButton = new JButton("Generate Quiz");
         private final JLabel statusLabel = new JLabel(" ", SwingConstants.CENTER);
+        private final JLabel userLabel = new JLabel("Not signed in.");
+        private final JButton historyButton = new JButton("Past Quizzes");
+        private final JButton logoutButton = new JButton("Log Out");
 
         HomePanel() {
             setLayout(new BoxLayout(this, BoxLayout.Y_AXIS));
@@ -141,15 +346,22 @@ public class AIQuizMaster extends JFrame {
 
             JLabel title = new JLabel("AI QuizMaster");
             title.setFont(TITLE_FONT);
-            title.setAlignmentX(CENTER_ALIGNMENT);
+            // title.setAlignmentX(CENTER_ALIGNMENT);
+            title.setBorder(BorderFactory.createEmptyBorder(0, 200, 0, 0)); 
 
             JLabel subtitle = new JLabel("Describe a topic and tailor the quiz to your preference.");
             subtitle.setFont(SUBTITLE_FONT);
-            subtitle.setAlignmentX(CENTER_ALIGNMENT);
+            // subtitle.setAlignmentX(CENTER_ALIGNMENT);
             subtitle.setForeground(MUTED_TEXT_COLOR);
+
+              // move 40 px right
+            subtitle.setBorder(BorderFactory.createEmptyBorder(0, 80, 0, 0));  // move 40 px right
+
 
             topicField.setMaximumSize(new Dimension(Integer.MAX_VALUE, 32));
             topicField.setAlignmentX(CENTER_ALIGNMENT);
+            
+
             topicField.setFont(topicField.getFont().deriveFont(16f));
             topicField.setToolTipText("Example: Machine Learning, World War II, Football");
             topicField.setBorder(BorderFactory.createCompoundBorder(
@@ -157,22 +369,25 @@ public class AIQuizMaster extends JFrame {
                     BorderFactory.createEmptyBorder(10, 12, 10, 12)
             ));
 
-            questionCountCombo.setAlignmentX(CENTER_ALIGNMENT);
+            // questionCountCombo.setAlignmentX(CENTER_ALIGNMENT);
             questionCountCombo.setMaximumSize(new Dimension(200, 32));
+            // questionCountCombo.setBorder(BorderFactory.createEmptyBorder(0, 100, 0, 0));  // move 40 px right
+
+
             questionCountCombo.setSelectedItem(QUESTION_COUNT_OPTIONS[0]);
             questionCountCombo.setFocusable(false);
             questionCountCombo.setBorder(BorderFactory.createCompoundBorder(
                     BorderFactory.createLineBorder(SURFACE_BORDER),
-                    BorderFactory.createEmptyBorder(6, 8, 6, 8)
+                    BorderFactory.createEmptyBorder(6, 80, 6, 8)
             ));
 
-            difficultyCombo.setAlignmentX(CENTER_ALIGNMENT);
+            // difficultyCombo.setAlignmentX(CENTER_ALIGNMENT);
             difficultyCombo.setMaximumSize(new Dimension(200, 32));
             difficultyCombo.setSelectedItem("Medium");
             difficultyCombo.setFocusable(false);
             difficultyCombo.setBorder(BorderFactory.createCompoundBorder(
                     BorderFactory.createLineBorder(SURFACE_BORDER),
-                    BorderFactory.createEmptyBorder(6, 8, 6, 8)
+                    BorderFactory.createEmptyBorder(6, 80, 6, 8)
             ));
 
             generateButton.setAlignmentX(CENTER_ALIGNMENT);
@@ -186,7 +401,10 @@ public class AIQuizMaster extends JFrame {
             statusLabel.setVisible(false);
 
             JLabel questionCountLabel = new JLabel("Number of Questions", SwingConstants.CENTER);
-            questionCountLabel.setAlignmentX(CENTER_ALIGNMENT);
+            // questionCountLabel.setAlignmentX(CENTER_ALIGNMENT);
+            questionCountLabel.setBorder(BorderFactory.createEmptyBorder(0, 70, 0, 0));  // move 40 px right
+
+
             questionCountLabel.setForeground(MUTED_TEXT_COLOR);
             questionCountLabel.setFont(SUBTITLE_FONT);
 
@@ -204,6 +422,38 @@ public class AIQuizMaster extends JFrame {
             tipsLabel.setForeground(MUTED_TEXT_COLOR);
             tipsLabel.setFont(tipsLabel.getFont().deriveFont(13f));
 
+            JPanel userRow = new JPanel();
+            userRow.setLayout(new BoxLayout(userRow, BoxLayout.X_AXIS));
+            userRow.setOpaque(false);
+            userRow.setAlignmentX(LEFT_ALIGNMENT);
+
+            userLabel.setAlignmentX(LEFT_ALIGNMENT);
+            userLabel.setForeground(MUTED_TEXT_COLOR);
+            userLabel.setFont(SUBTITLE_FONT);
+
+            styleSecondaryButton(historyButton);
+            historyButton.setAlignmentX(RIGHT_ALIGNMENT);
+            historyButton.setFocusable(false);
+            historyButton.setMaximumSize(new Dimension(160, 36));
+            historyButton.addActionListener(e -> {
+                historyPanel.refresh();
+                cardLayout.show(cardContainer, CARD_HISTORY);
+            });
+
+            styleSecondaryButton(logoutButton);
+            logoutButton.setAlignmentX(RIGHT_ALIGNMENT);
+            logoutButton.setFocusable(false);
+            logoutButton.setMaximumSize(new Dimension(140, 36));
+            logoutButton.addActionListener(e -> logoutCurrentUser());
+
+            userRow.add(userLabel);
+            userRow.add(Box.createHorizontalGlue());
+            userRow.add(historyButton);
+            userRow.add(Box.createHorizontalStrut(8));
+            userRow.add(logoutButton);
+
+            card.add(userRow);
+            card.add(Box.createRigidArea(new Dimension(0, 12)));
             card.add(title);
             card.add(Box.createRigidArea(new Dimension(0, 8)));
             card.add(subtitle);
@@ -229,10 +479,18 @@ public class AIQuizMaster extends JFrame {
             add(Box.createVerticalGlue());
 
             topicField.addActionListener(this::onGenerate);
+            updateUser(null);
         }
 
         private void onGenerate(ActionEvent event) {
             statusLabel.setText(" ");
+            if (currentUser == null) {
+                statusLabel.setText("Please sign in to start a quiz.");
+                statusLabel.setForeground(ERROR_COLOR);
+                statusLabel.setVisible(true);
+                cardLayout.show(cardContainer, CARD_LOGIN);
+                return;
+            }
             String topic = topicField.getText().trim();
             if (topic.isEmpty()) {
                 statusLabel.setText("Please enter a topic to continue.");
@@ -277,6 +535,105 @@ public class AIQuizMaster extends JFrame {
             questionCountCombo.setEnabled(true);
             difficultyCombo.setEnabled(true);
             statusLabel.setVisible(false);
+        }
+
+        void updateUser(String username) {
+            if (username == null || username.isBlank()) {
+                userLabel.setText("Not signed in.");
+                historyButton.setEnabled(false);
+                logoutButton.setEnabled(false);
+            } else {
+                userLabel.setText("Signed in as " + username);
+                historyButton.setEnabled(true);
+                logoutButton.setEnabled(true);
+            }
+        }
+    }
+
+    private final class HistoryPanel extends JPanel {
+        private final DefaultListModel<String> historyModel = new DefaultListModel<>();
+        private final JList<String> historyList = new JList<>(historyModel);
+        private final JButton backButton = new JButton("Back to Home");
+
+        HistoryPanel() {
+            setLayout(new BoxLayout(this, BoxLayout.Y_AXIS));
+            setBorder(BorderFactory.createEmptyBorder(0, 24, 0, 24));
+            setOpaque(true);
+            setBackground(BACKGROUND_COLOR);
+
+            JPanel card = createCardPanel();
+            card.setAlignmentX(CENTER_ALIGNMENT);
+
+            JLabel title = new JLabel("Past Quizzes");
+            title.setFont(TITLE_FONT);
+            title.setAlignmentX(CENTER_ALIGNMENT);
+
+            JLabel subtitle = new JLabel("Track how you've performed over time.", SwingConstants.CENTER);
+            subtitle.setFont(SUBTITLE_FONT);
+            subtitle.setForeground(MUTED_TEXT_COLOR);
+            subtitle.setAlignmentX(CENTER_ALIGNMENT);
+
+            historyList.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
+            historyList.setVisibleRowCount(10);
+            historyList.setFont(historyList.getFont().deriveFont(14f));
+            historyList.setFocusable(false);
+            historyList.setFixedCellHeight(36);
+
+            JScrollPane scrollPane = new JScrollPane(historyList);
+            scrollPane.setAlignmentX(LEFT_ALIGNMENT);
+            scrollPane.setBorder(BorderFactory.createLineBorder(SURFACE_BORDER));
+
+            styleSecondaryButton(backButton);
+            backButton.setAlignmentX(CENTER_ALIGNMENT);
+            backButton.addActionListener(e -> cardLayout.show(cardContainer, CARD_HOME));
+
+            card.add(title);
+            card.add(Box.createRigidArea(new Dimension(0, 8)));
+            card.add(subtitle);
+            card.add(Box.createRigidArea(new Dimension(0, 24)));
+            card.add(scrollPane);
+            card.add(Box.createRigidArea(new Dimension(0, 18)));
+            card.add(backButton);
+
+            add(Box.createVerticalGlue());
+            add(card);
+            add(Box.createVerticalGlue());
+        }
+
+        void refresh() {
+            historyModel.clear();
+            if (currentUser == null) {
+                historyModel.addElement("Sign in to view your quiz history.");
+                return;
+            }
+            List<QuizHistoryStore.QuizRecord> records = historyStore.loadForUser(currentUser);
+            if (records.isEmpty()) {
+                historyModel.addElement("No quizzes completed yet.");
+                return;
+            }
+            for (QuizHistoryStore.QuizRecord record : records) {
+                String topicLabel = record.topic == null || record.topic.isBlank() ? "Custom Quiz" : record.topic;
+                String difficultyLabel = capitalize(record.difficulty);
+                String line = String.format(
+                        "%s • %s (%s) • %d/%d correct (%d%%)",
+                        formatTimestamp(record.timestamp),
+                        topicLabel,
+                        difficultyLabel,
+                        record.correctCount,
+                        record.total,
+                        record.scorePercent
+                );
+                historyModel.addElement(line);
+            }
+        }
+
+        private String formatTimestamp(String timestamp) {
+            try {
+                Instant instant = Instant.parse(timestamp);
+                return HISTORY_TIME_FORMAT.format(instant);
+            } catch (Exception ex) {
+                return timestamp != null ? timestamp : "";
+            }
         }
     }
 
